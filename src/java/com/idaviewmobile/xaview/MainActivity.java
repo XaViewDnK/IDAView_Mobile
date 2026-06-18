@@ -275,7 +275,24 @@ public class MainActivity extends Activity {
         listAdapter = new IdaAdapter();
         listView.setAdapter(listAdapter);
 
-        if (savedInstanceState == null) openFilePicker();
+        if (savedInstanceState == null) {
+            if (android.os.Build.VERSION.SDK_INT >= 23 && checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 100);
+            } else {
+                openFilePicker();
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 100) {
+            // Запускаем выбор файла в любом случае. 
+            // На некоторых прошивках ACTION_OPEN_DOCUMENT может работать и без полных прав, 
+            // но сам факт запроса часто инициализирует нужные системные привязки к памяти.
+            openFilePicker();
+        }
     }
 
     private void showPopupMenu() {
@@ -975,6 +992,12 @@ public class MainActivity extends Activity {
                     zis.closeEntry();
                 }
                 zis.close(); is.close();
+
+                // Если после попытки распаковки мы не нашли ни одного файла, значит 
+                // системный поток вернул 0 байт, либо файл не является архивом .IDAVIEW
+                if (idaOffsets.size == 0 && strOffsets.size == 0 && funcOffsets.size == 0) {
+                    throw new Exception("Invalid file. The selected file is not a valid .IDAVIEW archive or cannot be read.");
+                }
 
                 try {
                     functionStarts.clear();
