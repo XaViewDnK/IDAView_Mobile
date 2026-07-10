@@ -45,6 +45,9 @@ import android.widget.PopupMenu;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.ScrollView;
+import android.util.LongSparseArray;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -71,39 +74,53 @@ public class MainActivity extends Activity {
     private static final int PICK_FILE_REQUEST = 1;
     private static final int LINES_PER_CHUNK = 100;
 
-    private Button btnTabIda, btnTabStr, btnTabFunc, btnMenu;
+    private Button btnTabIda, btnTabHex, btnTabStr, btnTabFunc, btnMenu;
     private LinearLayout emptyLayout, stringsSearchBar;
     private EditText editStrSearch;
     private ListView listView;
     private IdaAdapter listAdapter;
 
-    private int currentTab = 0; // 0 = IDA, 1 = Strings, 2 = Functions
+    private int currentTab = 0; // 0 = IDA, 1 = Hex, 2 = Strings, 3 = Functions
     private boolean isSearchingStrings = false;
     private int idaScrollPos = 0;
     private int idaScrollTop = 0;
+    private int hexScrollPos = 0;
+    private int hexScrollTop = 0;
+    private boolean isShowHexEnabled = false;
 
     private void switchTab(int newTab) {
+        int oldTab = currentTab;
         if (currentTab == 0 && newTab != 0) {
             idaScrollPos = listView.getFirstVisiblePosition();
             View cv = listView.getChildAt(0);
             idaScrollTop = (cv == null) ? 0 : cv.getTop();
+        } else if (currentTab == 1 && newTab != 1) {
+            hexScrollPos = listView.getFirstVisiblePosition();
+            View cv = listView.getChildAt(0);
+            hexScrollTop = (cv == null) ? 0 : cv.getTop();
         }
         currentTab = newTab;
         updateTabs();
         
-        // Теперь setAdapter делает обновление мгновенным, никакие post() не нужны
-        if (currentTab == 0) {
+        if ((newTab == 0 || newTab == 1) && !highlightedAddress.isEmpty() && oldTab != newTab) {
+            doJump(highlightedAddress, false);
+        } else if (currentTab == 0) {
             listView.setSelectionFromTop(idaScrollPos, idaScrollTop);
+        } else if (currentTab == 1) {
+            listView.setSelectionFromTop(hexScrollPos, hexScrollTop);
         }
     }
 
     private LongArray idaOffsets = new LongArray();
+    private LongArray hexOffsets = new LongArray();
     private LongArray strOffsets = new LongArray();
     private LongArray filteredStrOffsets = new LongArray();
     private LongArray funcOffsets = new LongArray();
     private LongArray filteredFuncOffsets = new LongArray();
 
     private File cacheIdaFile;
+    private File cacheHexFile;
+    private File cacheItemHexFile;
     private File cacheStrFile;
     private File cacheFilteredStrFile;
     private File cacheFuncFile;
@@ -144,7 +161,7 @@ public class MainActivity extends Activity {
     private static final Pattern patGreenNum = Pattern.compile("\\b([0-9]+[0-9A-Fa-f]*h?|0x[0-9A-Fa-f]+)\\b");
     private static final Pattern patStr = Pattern.compile("('[^']*'|\"[^\"]*\")");
     private static final Pattern patPink = Pattern.compile("(?:call\\s+ds:|jmp\\s+ds:|extrn\\s+|(?:rva\\s+(?=[A-Z])))([A-Za-z_][A-Za-z0-9_]*)");
-    private static final Pattern patAddr = Pattern.compile("^\\s*\\.?[a-zA-Z0-9_]+:([0-9A-Fa-f]+)");
+    private static final Pattern patAddr = Pattern.compile("^\\s*[a-zA-Z0-9_\\.\\-]+:([0-9A-Fa-f]+)");
     private static final Pattern patDirectives = Pattern.compile("\\b(assume|segment|ends|endp|proc|public|end)\\b");
 
     static class Xref {
@@ -180,6 +197,12 @@ public class MainActivity extends Activity {
         btnTabIda.setPadding(0, 0, 0, 0);
         btnTabIda.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
 
+        btnTabHex = new Button(this);
+        btnTabHex.setText("Hex View");
+        btnTabHex.setTextSize(12);
+        btnTabHex.setPadding(0, 0, 0, 0);
+        btnTabHex.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
+
         btnTabStr = new Button(this);
         btnTabStr.setText("Strings");
         btnTabStr.setTextSize(12);
@@ -193,6 +216,7 @@ public class MainActivity extends Activity {
         btnTabFunc.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
 
         tabLayout.addView(btnTabIda);
+        tabLayout.addView(btnTabHex);
         tabLayout.addView(btnTabStr);
         tabLayout.addView(btnTabFunc);
 
@@ -263,10 +287,12 @@ public class MainActivity extends Activity {
         setContentView(rootLayout);
 
         btnTabIda.setOnClickListener(v -> switchTab(0));
-        btnTabStr.setOnClickListener(v -> switchTab(1));
-        btnTabFunc.setOnClickListener(v -> switchTab(2));
+        btnTabHex.setOnClickListener(v -> switchTab(1));
+        btnTabStr.setOnClickListener(v -> switchTab(2));
+        btnTabFunc.setOnClickListener(v -> switchTab(3));
 
         cacheIdaFile = new File(getCacheDir(), "ida.lst");
+        cacheHexFile = new File(getCacheDir(), "hex_view.txt");
         cacheStrFile = new File(getCacheDir(), "strings.txt");
         cacheFilteredStrFile = new File(getCacheDir(), "strings_filtered.txt");
         cacheFuncFile = new File(getCacheDir(), "functions.txt");
@@ -302,11 +328,14 @@ public class MainActivity extends Activity {
             popup.getMenu().add(0, 6, 0, "Jump Back");
         }
         if (currentTab == 0) {
+            popup.getMenu().add(0, 8, 0, isShowHexEnabled ? "Visual: Hide HEX" : "Visual: Show HEX");
             popup.getMenu().add(0, 7, 0, "Export functions list");
             popup.getMenu().add(0, 1, 0, "Jump: to address");
             popup.getMenu().add(0, 2, 0, "Search: text");
             popup.getMenu().add(0, 3, 0, "Search: next next");
             popup.getMenu().add(0, 4, 0, "Search: immediate value");
+        } else if (currentTab == 1) {
+            popup.getMenu().add(0, 1, 0, "Jump: to address");
         } else {
             popup.getMenu().add(0, 2, 0, "Search: text");
             popup.getMenu().add(0, 3, 0, "Search: next next");
@@ -314,6 +343,9 @@ public class MainActivity extends Activity {
 
         popup.setOnMenuItemClickListener(item -> {
             switch(item.getItemId()) {
+                case 8: 
+                    toggleShowHex();
+                    break;
                 case 7: showExportFunctionsDialog(); break;
                 case 1: showJumpDialog(); break;
                 case 2:
@@ -331,6 +363,11 @@ public class MainActivity extends Activity {
             return true;
         });
         popup.show();
+    }
+
+        private void toggleShowHex() {
+        isShowHexEnabled = !isShowHexEnabled;
+        listAdapter.notifyDataSetChanged();
     }
 
     private void goBackHistory() {
@@ -436,10 +473,21 @@ public class MainActivity extends Activity {
     }
 
     private void doJump(String address, boolean showToastNotFound) {
-        ProgressDialog pd = ProgressDialog.show(this, "Jumping", "Please wait...", true, false);
+        ProgressDialog pd = new ProgressDialog(this);
+        pd.setTitle("Jumping");
+        pd.setMessage("Please wait...");
+        pd.setIndeterminate(true);
+        pd.setCancelable(true); // Разрешаем закрытие системной кнопкой "Назад"
+        pd.setCanceledOnTouchOutside(false); // Но запрещаем закрытие случайным тапом мимо окна
+        pd.show();
+        
+        final boolean[] isCancelled = {false};
+        pd.setOnCancelListener(dialog -> isCancelled[0] = true);
+
         new Thread(() -> {
             try {
-                BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(cacheIdaFile)));
+                File fileToSearch = (currentTab == 1) ? cacheHexFile : cacheIdaFile;
+                BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(fileToSearch)));
                 String line;
                 int lineCount = 0;
                 int targetLine = -1;
@@ -471,24 +519,34 @@ public class MainActivity extends Activity {
                 } catch (NumberFormatException ignored) {}
 
                 while ((line = br.readLine()) != null) {
+                    if (isCancelled[0]) break; // Мгновенно прерываем поиск, если нажата кнопка "Назад"
+
                     if (targetVal != -1) {
-                        // Быстрый фильтр: строка должна содержать адрес хотя бы в одном из форматов.
-                        // String.contains работает в сотни раз быстрее Regex, отсеивая 99.9% мусора.
-                        if (line.contains(hex8) || line.contains(hex16) || line.contains(rawUpper)) {
-                            Matcher mAddr = patAddr.matcher(line);
-                            if (mAddr.find()) {
+                        if (currentTab == 1) {
+                            int tabIdx = line.indexOf('\t');
+                            if (tabIdx > 0) {
                                 try {
-                                    // Сравниваем именно адрес строки, а не операнды внутри
-                                    if (Long.parseLong(mAddr.group(1), 16) == targetVal) {
+                                    if (Long.parseLong(line.substring(0, tabIdx).trim(), 16) >= targetVal) {
                                         targetLine = lineCount;
                                         break;
                                     }
-                                } catch (NumberFormatException ignored) {}
+                                } catch (Exception ignored) {}
+                            }
+                        } else {
+                            if (line.contains(hex8) || line.contains(hex16) || line.contains(rawUpper)) {
+                                Matcher mAddr = patAddr.matcher(line);
+                                if (mAddr.find()) {
+                                    try {
+                                        if (Long.parseLong(mAddr.group(1), 16) == targetVal) {
+                                            targetLine = lineCount;
+                                            break;
+                                        }
+                                    } catch (NumberFormatException ignored) {}
+                                }
                             }
                         }
                     } else {
-                        // Фолбэк на случай, если пользователь вбил не Hex, а кусок текста (например имя функции)
-                        if (line.contains(address)) {
+                        if (currentTab != 1 && line.contains(address)) {
                             targetLine = lineCount;
                             break;
                         }
@@ -499,10 +557,17 @@ public class MainActivity extends Activity {
 
                 final int finalTargetLine = targetLine;
                 new Handler(Looper.getMainLooper()).post(() -> {
-                    pd.dismiss();
+                    if (pd.isShowing()) pd.dismiss();
+                    if (isCancelled[0]) return; // Выходим без изменения UI и смены вкладок
+
                     if (finalTargetLine != -1) {
                         highlightedAddress = address;
-                        currentTab = 0;
+                        
+                        // Если мы прыгаем из списка строк или функций (вкладки 2 и 3) - кидаем в IDA View
+                        // Если прыжок вызван переключением или поиском внутри IDA/Hex, остаемся в целевой вкладке
+                        if (currentTab != 0 && currentTab != 1) {
+                            currentTab = 0;
+                        }
                         updateTabs();
                         
                         int finalChunk = finalTargetLine / LINES_PER_CHUNK;
@@ -510,16 +575,23 @@ public class MainActivity extends Activity {
                         float density = getResources().getDisplayMetrics().density;
                         int yOffset = (int) (lineInChunk * 15 * density);
                         
-                        idaScrollPos = finalChunk;
-                        idaScrollTop = (listView.getHeight() / 2) - yOffset;
-                        // Вызываем синхронно, так как updateTabs() уже сбросил список
-                        listView.setSelectionFromTop(idaScrollPos, idaScrollTop);
+                        if (currentTab == 0) {
+                            idaScrollPos = finalChunk;
+                            idaScrollTop = (listView.getHeight() / 2) - yOffset;
+                            listView.setSelectionFromTop(idaScrollPos, idaScrollTop);
+                        } else if (currentTab == 1) {
+                            hexScrollPos = finalChunk;
+                            hexScrollTop = (listView.getHeight() / 2) - yOffset;
+                            listView.setSelectionFromTop(hexScrollPos, hexScrollTop);
+                        }
                     } else if (showToastNotFound) {
-                        Toast.makeText(MainActivity.this, "Address not found in IDA View", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, "Address not found in " + (currentTab == 1 ? "Hex View" : "IDA View"), Toast.LENGTH_SHORT).show();
                     }
                 });
             } catch (Exception e) {
-                new Handler(Looper.getMainLooper()).post(() -> pd.dismiss());
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    if (pd.isShowing()) pd.dismiss();
+                });
             }
         }).start();
     }
@@ -672,7 +744,7 @@ public class MainActivity extends Activity {
             }
             br.close();
             String res = sb.toString().trim();
-            res = res.replaceAll("(\\n\\s*\\.?[a-zA-Z0-9_]+:[0-9A-Fa-f]+\\s*)+$", "");
+            res = res.replaceAll("(\\n\\s*[a-zA-Z0-9_\\.\\-]+:[0-9A-Fa-f]+\\s*)+$", "");
             return res;
         } catch (Exception e) {
             return "";
@@ -715,6 +787,7 @@ public class MainActivity extends Activity {
                 
                 FileOutputStream fos = new FileOutputStream(outFile);
                 
+                boolean isFirst = true;
                 for (int i = 0; i < functions.size(); i++) {
                     String funcInput = functions.get(i);
                     String targetAddr = "";
@@ -746,8 +819,11 @@ public class MainActivity extends Activity {
                         if (!content.isEmpty()) {
                             // Применяем актуальные комментарии и ренеймы к блоку кода перед сохранением
                             content = applyPendingChanges(content);
+                            if (!isFirst) {
+                                fos.write("\n\n=======================\n\n".getBytes("UTF-8"));
+                            }
                             fos.write(content.getBytes("UTF-8"));
-                            fos.write("\n\n=======================\n\n".getBytes("UTF-8"));
+                            isFirst = false;
                         }
                     }
                 }
@@ -912,9 +988,10 @@ public class MainActivity extends Activity {
                 ZipInputStream zis = new ZipInputStream(is);
                 ZipEntry entry;
 
-                idaOffsets.clear(); strOffsets.clear(); funcOffsets.clear();
+                idaOffsets.clear(); hexOffsets.clear(); strOffsets.clear(); funcOffsets.clear();
                 xrefsFromOffsets.clear(); xrefsToOffsets.clear();
                 jumpHistory.clear();
+                isShowHexEnabled = false;
 
                 while ((entry = zis.getNextEntry()) != null) {
                     String name = entry.getName();
@@ -969,9 +1046,16 @@ public class MainActivity extends Activity {
                             xrefsToOffsets.put(currentTo, lineStartOffset);
                         }
                         raf.close();
-                    } else if (name.equals("ida.lst") || name.equals("strings.txt") || name.equals("functions.txt")) {
-                        File targetFile = name.equals("ida.lst") ? cacheIdaFile : (name.equals("strings.txt") ? cacheStrFile : cacheFuncFile);
-                        LongArray targetOffsets = name.equals("ida.lst") ? idaOffsets : (name.equals("strings.txt") ? strOffsets : funcOffsets);
+                    } else if (name.equals("item_hex.txt")) {
+                        cacheItemHexFile = new File(getCacheDir(), "item_hex.txt");
+                        FileOutputStream fosItemHex = new FileOutputStream(cacheItemHexFile);
+                        byte[] buf = new byte[65536]; 
+                        int lenHex;
+                        while ((lenHex = zis.read(buf)) > 0) fosItemHex.write(buf, 0, lenHex);
+                        fosItemHex.close();
+                    } else if (name.equals("ida.lst") || name.equals("hex_view.txt") || name.equals("strings.txt") || name.equals("functions.txt")) {
+                        File targetFile = name.equals("ida.lst") ? cacheIdaFile : (name.equals("hex_view.txt") ? cacheHexFile : (name.equals("strings.txt") ? cacheStrFile : cacheFuncFile));
+                        LongArray targetOffsets = name.equals("ida.lst") ? idaOffsets : (name.equals("hex_view.txt") ? hexOffsets : (name.equals("strings.txt") ? strOffsets : funcOffsets));
                         FileOutputStream fos = new FileOutputStream(targetFile);
                         long byteCounter = 0; int lineCounter = 0;
                         targetOffsets.add(0);
@@ -993,9 +1077,7 @@ public class MainActivity extends Activity {
                 }
                 zis.close(); is.close();
 
-                // Если после попытки распаковки мы не нашли ни одного файла, значит 
-                // системный поток вернул 0 байт, либо файл не является архивом .IDAVIEW
-                if (idaOffsets.size == 0 && strOffsets.size == 0 && funcOffsets.size == 0) {
+                if (idaOffsets.size == 0 && hexOffsets.size == 0 && strOffsets.size == 0 && funcOffsets.size == 0) {
                     throw new Exception("Invalid file. The selected file is not a valid .IDAVIEW archive or cannot be read.");
                 }
 
@@ -1044,10 +1126,11 @@ public class MainActivity extends Activity {
 
     private void updateTabs() {
         btnTabIda.setBackgroundColor(currentTab == 0 ? Color.LTGRAY : Color.TRANSPARENT);
-        btnTabStr.setBackgroundColor(currentTab == 1 ? Color.LTGRAY : Color.TRANSPARENT);
-        btnTabFunc.setBackgroundColor(currentTab == 2 ? Color.LTGRAY : Color.TRANSPARENT);
-        stringsSearchBar.setVisibility(currentTab == 0 ? View.GONE : (isSearchingStrings ? View.VISIBLE : View.GONE));
-        editStrSearch.setHint(currentTab == 1 ? "Search strings..." : "Search functions...");
+        btnTabHex.setBackgroundColor(currentTab == 1 ? Color.LTGRAY : Color.TRANSPARENT);
+        btnTabStr.setBackgroundColor(currentTab == 2 ? Color.LTGRAY : Color.TRANSPARENT);
+        btnTabFunc.setBackgroundColor(currentTab == 3 ? Color.LTGRAY : Color.TRANSPARENT);
+        stringsSearchBar.setVisibility((currentTab == 0 || currentTab == 1) ? View.GONE : (isSearchingStrings ? View.VISIBLE : View.GONE));
+        editStrSearch.setHint(currentTab == 2 ? "Search strings..." : "Search functions...");
         
         // Жесткий сброс состояния ListView. Это заставит его забыть старые размеры 
         // и без конфликтов применить новую позицию прокрутки.
@@ -1140,7 +1223,7 @@ public class MainActivity extends Activity {
                 br.close();
 
                 String tempRes = sb.toString().trim();
-                tempRes = tempRes.replaceAll("(\\n\\s*\\.?[a-zA-Z0-9_]+:[0-9A-Fa-f]+\\s*)+$", "");
+                tempRes = tempRes.replaceAll("(\\n\\s*[a-zA-Z0-9_\\.\\-]+:[0-9A-Fa-f]+\\s*)+$", "");
                 final String res = tempRes;
 
                 new Handler(Looper.getMainLooper()).post(() -> {
@@ -1470,7 +1553,8 @@ public class MainActivity extends Activity {
         @Override public int getCount() {
             LongArray offsets;
             if (currentTab == 0) offsets = idaOffsets;
-            else if (currentTab == 1) offsets = isSearchingStrings ? filteredStrOffsets : strOffsets;
+            else if (currentTab == 1) offsets = hexOffsets;
+            else if (currentTab == 2) offsets = isSearchingStrings ? filteredStrOffsets : strOffsets;
             else offsets = isSearchingStrings ? filteredFuncOffsets : funcOffsets;
             return Math.max(0, offsets.size - 1);
         }
@@ -1498,14 +1582,18 @@ public class MainActivity extends Activity {
                                 int offset = layout.getOffsetForHorizontal(line, x);
                                 int lineStart = layout.getLineStart(line);
                                 int charPos = offset - lineStart;
-                                if (currentTab == 1) { // Strings
+                                if (currentTab == 2) { // Strings
                                     if (charPos <= 21) selectedColumnIndex = 0;
                                     else if (charPos <= 32) selectedColumnIndex = 1;
                                     else if (charPos <= 37) selectedColumnIndex = 2;
                                     else selectedColumnIndex = 3;
-                                } else { // Functions
+                                } else if (currentTab == 3) { // Functions
                                     if (charPos <= 21) selectedColumnIndex = 0;
                                     else if (charPos <= 32) selectedColumnIndex = 1;
+                                    else selectedColumnIndex = 2;
+                                } else if (currentTab == 1) { // Hex View
+                                    if (charPos <= 10) selectedColumnIndex = 0;
+                                    else if (charPos <= 59) selectedColumnIndex = 1;
                                     else selectedColumnIndex = 2;
                                 }
                             }
@@ -1539,6 +1627,26 @@ public class MainActivity extends Activity {
                                     int offset = layout.getOffsetForHorizontal(line, x);
                                     String word = extractWord(lineStr.toString(), offset - start);
                                     showLongTapMenu(addr, word);
+                                }
+                            }
+                        } else if (currentTab == 1) {
+                            int y = (int) e.getY() - tv.getTotalPaddingTop() + tv.getScrollY();
+                            Layout layout = tv.getLayout();
+                            if (layout != null) {
+                                int line = layout.getLineForVertical(Math.max(0, y));
+                                if (line >= 0 && line < layout.getLineCount()) {
+                                    int start = layout.getLineStart(line);
+                                    int end = layout.getLineEnd(line);
+                                    String lineStr = tv.getText().subSequence(start, end).toString();
+                                    
+                                    Matcher m = Pattern.compile("^[0-9A-Fa-f]+\\s+((?:[0-9A-Fa-f]{2}\\s*)+)").matcher(lineStr.trim());
+                                    if (m.find()) {
+                                        String rawHex = m.group(1).replace(" ", "");
+                                        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                                        ClipData clip = ClipData.newPlainText("IDA Hex", rawHex);
+                                        clipboard.setPrimaryClip(clip);
+                                        Toast.makeText(MainActivity.this, "Copied Hex (no spaces):\n" + rawHex, Toast.LENGTH_SHORT).show();
+                                    }
                                 }
                             }
                         }
@@ -1576,7 +1684,8 @@ public class MainActivity extends Activity {
 
             File targetFile; LongArray offsets;
             if (currentTab == 0) { targetFile = cacheIdaFile; offsets = idaOffsets; }
-            else if (currentTab == 1) { targetFile = isSearchingStrings ? cacheFilteredStrFile : cacheStrFile; offsets = isSearchingStrings ? filteredStrOffsets : strOffsets; }
+            else if (currentTab == 1) { targetFile = cacheHexFile; offsets = hexOffsets; }
+            else if (currentTab == 2) { targetFile = isSearchingStrings ? cacheFilteredStrFile : cacheStrFile; offsets = isSearchingStrings ? filteredStrOffsets : strOffsets; }
             else { targetFile = isSearchingStrings ? cacheFilteredFuncFile : cacheFuncFile; offsets = isSearchingStrings ? filteredFuncOffsets : funcOffsets; }
 
             try {
@@ -1587,9 +1696,121 @@ public class MainActivity extends Activity {
                     byte[] buffer = new byte[length];
                     raf.seek(startByte); raf.readFully(buffer);
                     String chunkText = new String(buffer, "UTF-8");
-                    if (chunkText.endsWith("\n")) chunkText = chunkText.substring(0, chunkText.length() - 1); // Сшиваем чанки
-                    if (currentTab == 0) tv.setText(applyIdaStyle(applyPendingChanges(chunkText)));
-                    else if (currentTab == 1) tv.setText(formatStringsTab(chunkText));
+                    if (chunkText.endsWith("\n")) chunkText = chunkText.substring(0, chunkText.length() - 1); 
+                    
+                    if (currentTab == 0) {
+                        chunkText = applyPendingChanges(chunkText);
+                        if (isShowHexEnabled) {
+                            StringBuilder sb = new StringBuilder();
+                            long lastSeenAddr = -1;
+                            long currentHexPtr = -1;
+                            RandomAccessFile hexRaf = null;
+                            long hexFileLength = 0;
+                            try { 
+                                hexRaf = new RandomAccessFile(cacheItemHexFile, "r"); 
+                                hexFileLength = hexRaf.length();
+                            } catch(Exception e){}
+                            
+                            for (String line : chunkText.split("\n", -1)) {
+                                long currentLineAddr = -1;
+                                Matcher mAddr = patAddr.matcher(line);
+                                if (mAddr.find()) {
+                                    try { currentLineAddr = Long.parseLong(mAddr.group(1), 16); } catch(Exception e){}
+                                }
+                                String hexToAppend = null;
+                                if (currentLineAddr != -1 && currentLineAddr != lastSeenAddr && hexRaf != null && hexFileLength > 0) {
+                                    lastSeenAddr = currentLineAddr;
+                                    boolean found = false;
+
+                                    // БЫСТРЫЙ ПУТЬ: Последовательное чтение (работает для 99% строк, так как мы идем вниз по чанку)
+                                    if (currentHexPtr != -1) {
+                                        try {
+                                            hexRaf.seek(currentHexPtr);
+                                            for (int i = 0; i < 5; i++) { // Проверяем до 5 строк вперед
+                                                long ptrBefore = hexRaf.getFilePointer();
+                                                String hLine = hexRaf.readLine();
+                                                if (hLine == null) break;
+                                                
+                                                int tabIdx = hLine.indexOf('\t');
+                                                if (tabIdx > 0) {
+                                                    long hAddr = Long.parseLong(hLine.substring(0, tabIdx).trim(), 16);
+                                                    if (hAddr == currentLineAddr) {
+                                                        hexToAppend = hLine.substring(tabIdx + 1).trim();
+                                                        currentHexPtr = hexRaf.getFilePointer(); // Запоминаем для следующей строки
+                                                        found = true;
+                                                        break;
+                                                    } else if (hAddr > currentLineAddr) {
+                                                        currentHexPtr = ptrBefore; // Промах, откатываемся, чтобы следующая строка проверила отсюда
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        } catch (Exception e) {}
+                                    }
+
+                                    // МЕДЛЕННЫЙ ПУТЬ: Прямой бинарный поиск по файлу без бесконечного цикла (вызывается 1 раз на чанк)
+                                    if (!found) {
+                                        long low = 0;
+                                        long high = hexFileLength;
+                                        try {
+                                            while (low <= high) {
+                                                long mid = (low + high) >>> 1;
+                                                hexRaf.seek(mid);
+                                                
+                                                if (mid > 0) {
+                                                    while (mid < high && hexRaf.read() != '\n') mid++;
+                                                }
+                                                
+                                                long lineStart = hexRaf.getFilePointer();
+                                                String hLine = hexRaf.readLine();
+                                                long nextLineStart = hexRaf.getFilePointer(); // БЕЗОПАСНЫЙ сдвиг low (защита от бесконечного цикла)
+                                                
+                                                if (hLine == null) {
+                                                    high = mid - 1;
+                                                    continue;
+                                                }
+                                                
+                                                int tabIdx = hLine.indexOf('\t');
+                                                if (tabIdx > 0) {
+                                                    long hAddr = Long.parseLong(hLine.substring(0, tabIdx).trim(), 16);
+                                                    if (hAddr == currentLineAddr) {
+                                                        hexToAppend = hLine.substring(tabIdx + 1).trim();
+                                                        currentHexPtr = nextLineStart;
+                                                        break;
+                                                    } else if (hAddr < currentLineAddr) {
+                                                        low = nextLineStart;
+                                                        if (low <= lineStart) low = lineStart + 1; // Запасной парашют от зависания
+                                                    } else {
+                                                        high = mid - 1;
+                                                    }
+                                                } else {
+                                                    low = nextLineStart;
+                                                    if (low <= lineStart) low = lineStart + 1;
+                                                }
+                                            }
+                                        } catch (Exception e) {}
+                                    }
+                                }
+                                
+                                if (hexToAppend != null && !hexToAppend.isEmpty()) {
+                                    int cmtIdx = line.indexOf(';');
+                                    if (cmtIdx >= 0) {
+                                        sb.append(line.substring(0, cmtIdx)).append("( ").append(hexToAppend).append(" ) ").append(line.substring(cmtIdx)).append("\n");
+                                    } else {
+                                        sb.append(line).append(" ( ").append(hexToAppend).append(" )\n");
+                                    }
+                                } else {
+                                    sb.append(line).append("\n");
+                                }
+                            }
+                            if (hexRaf != null) { try { hexRaf.close(); } catch(Exception e){} }
+                            if (sb.length() > 0) sb.setLength(sb.length() - 1);
+                            chunkText = sb.toString();
+                        }
+                        tv.setText(applyIdaStyle(chunkText));
+                    }
+                    else if (currentTab == 1) tv.setText(formatHexTab(chunkText));
+                    else if (currentTab == 2) tv.setText(formatStringsTab(chunkText));
                     else tv.setText(formatFunctionsTab(chunkText));
                 }
                 raf.close();
@@ -1598,6 +1819,35 @@ public class MainActivity extends Activity {
             tv.setTextIsSelectable(true);
             return tv;
         }
+    }
+
+    private CharSequence formatHexTab(String text) {
+        String[] lines = text.split("\n");
+        SpannableStringBuilder ssb = new SpannableStringBuilder();
+        for (String line : lines) {
+            String[] parts = line.split("\t");
+            if (parts.length >= 3) {
+                int c0Start = ssb.length(); String c0 = String.format("%-10s", parts[0]);
+                int c1Start = c0Start + c0.length(); String c1 = String.format("%-48s", parts[1]); // 16 bytes * 3 = 48
+                int c2Start = c1Start + c1.length(); String c2 = parts[2];
+                ssb.append(String.format("%s %s %s\n", c0, c1, c2));
+                
+                if (currentTab == 1 && parts[0].equals(selectedStrAddress) && selectedColumnIndex != -1) {
+                    int hStart = -1, hEnd = -1;
+                    if (selectedColumnIndex == 0) { hStart = c0Start; hEnd = c0Start + c0.length() - 1; }
+                    else if (selectedColumnIndex == 1) { hStart = c1Start; hEnd = c1Start + c1.length() - 1; }
+                    else if (selectedColumnIndex == 2) { hStart = c2Start; hEnd = c2Start + c2.length(); }
+                    if (hStart != -1) ssb.setSpan(new BackgroundColorSpan(Color.parseColor("#B4D5FE")), hStart, hEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+                }
+            } else ssb.append(line).append("\n");
+        }
+        
+        Matcher mAddr = Pattern.compile("^[0-9A-Fa-f]{8,}").matcher(ssb);
+        while (mAddr.find()) ssb.setSpan(new ForegroundColorSpan(Color.GRAY), mAddr.start(), mAddr.end(), 33);
+        Matcher mHex = Pattern.compile("(?<=^.{11})([0-9A-Fa-f]{2} )+").matcher(ssb);
+        while (mHex.find()) ssb.setSpan(new ForegroundColorSpan(Color.parseColor("#000080")), mHex.start(), mHex.end(), 33);
+        
+        return ssb;
     }
 
     private CharSequence formatStringsTab(String text) {
@@ -1613,7 +1863,7 @@ public class MainActivity extends Activity {
                 int c3Start = c2Start + c2.length() + 1; String c3 = parts[3];
                 ssb.append(String.format(" %s %s %s %s\n", c0, c1, c2, c3));
                 
-                if (currentTab == 1 && parts[0].equals(selectedStrAddress) && selectedColumnIndex != -1) {
+                if (currentTab == 2 && parts[0].equals(selectedStrAddress) && selectedColumnIndex != -1) {
                     int hStart = -1, hEnd = -1;
                     if (selectedColumnIndex == 0) { hStart = c0Start; hEnd = c0Start + c0.length(); }
                     else if (selectedColumnIndex == 1) { hStart = c1Start; hEnd = c1Start + c1.length(); }
@@ -1637,7 +1887,7 @@ public class MainActivity extends Activity {
                 int c2Start = c1Start + c1.length(); String c2 = parts[2];
                 ssb.append(String.format("%s%s%s\n", c0, c1, c2));
                 
-                if (currentTab == 2 && parts[0].equals(selectedStrAddress) && selectedColumnIndex != -1) {
+                if (currentTab == 3 && parts[0].equals(selectedStrAddress) && selectedColumnIndex != -1) {
                     int hStart = -1, hEnd = -1;
                     if (selectedColumnIndex == 0) { hStart = c0Start; hEnd = c0Start + c0.length() - 1; }
                     else if (selectedColumnIndex == 1) { hStart = c1Start; hEnd = c1Start + c1.length() - 1; }
@@ -1683,6 +1933,9 @@ public class MainActivity extends Activity {
             Matcher mPink = patPink.matcher(code); while (mPink.find()) ssb.setSpan(new ForegroundColorSpan(Color.parseColor("#FF00FF")), offset + mPink.start(1), offset + mPink.end(1), 33);
             Matcher mAddr = patAddr.matcher(code); if (mAddr.find()) ssb.setSpan(new DynamicAddressSpan(mAddr.group(1)), offset + mAddr.start(), offset + mAddr.end(), 33);
 
+            Matcher mHexIn = Pattern.compile("\\(\\s([0-9A-Fa-f]{2}\\s)+\\)").matcher(code);
+            while (mHexIn.find()) ssb.setSpan(new ForegroundColorSpan(Color.parseColor("#8B008B")), offset + mHexIn.start(), offset + mHexIn.end(), 33);
+
             if (commentIdx >= 0) {
                 String cmt = line.substring(commentIdx);
                 if (cmt.contains("DATA XREF:")) ssb.setSpan(new ForegroundColorSpan(lightBlueXref), offset + commentIdx, offset + lineLen, 33);
@@ -1713,7 +1966,6 @@ public class MainActivity extends Activity {
             p.setColor(oC); p.setStyle(oS); p.setFakeBoldText(false);
         }
     }
-
         static class LongMap {
         private static final int CHUNK_BITS = 13;
         private static final int CHUNK_SIZE = 1 << CHUNK_BITS; // 8192
@@ -1872,5 +2124,36 @@ public class MainActivity extends Activity {
         }
         long get(int index) { return data[index]; }
         void clear() { size = 0; }
+    }
+
+    static class LongChunkArray {
+        private static final int CHUNK_BITS = 13;
+        private static final int CHUNK_SIZE = 1 << CHUNK_BITS; // 8192
+        private static final int CHUNK_MASK = CHUNK_SIZE - 1;
+
+        private long[][] chunks = new long[16][];
+        public int size = 0;
+
+        public void add(long val) {
+            int c = size >> CHUNK_BITS;
+            int o = size & CHUNK_MASK;
+            if (c >= chunks.length) {
+                long[][] n = new long[chunks.length * 2][];
+                System.arraycopy(chunks, 0, n, 0, chunks.length);
+                chunks = n;
+            }
+            if (chunks[c] == null) chunks[c] = new long[CHUNK_SIZE];
+            chunks[c][o] = val;
+            size++;
+        }
+
+        public long get(int index) {
+            return chunks[index >> CHUNK_BITS][index & CHUNK_MASK];
+        }
+
+        public void clear() {
+            for (int i = 0; i < chunks.length; i++) chunks[i] = null;
+            size = 0;
+        }
     }
 }
