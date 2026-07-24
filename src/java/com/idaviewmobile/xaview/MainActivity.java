@@ -62,6 +62,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Stack;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -99,6 +100,13 @@ public class MainActivity extends Activity {
             View cv = listView.getChildAt(0);
             hexScrollTop = (cv == null) ? 0 : cv.getTop();
         }
+        
+        if (oldTab != newTab && isSearchingStrings) {
+            if (searchRunnable != null) searchHandler.removeCallbacks(searchRunnable);
+            editStrSearch.setText("");
+            isSearchingStrings = false;
+        }
+
         currentTab = newTab;
         updateTabs();
         
@@ -137,11 +145,15 @@ public class MainActivity extends Activity {
     private HashMap<String, String> pendingComments = new HashMap<>();
     private HashMap<String, String> pendingRenames = new HashMap<>();
     private HashSet<String> functionStarts = new HashSet<>();
-    private HashMap<String, String> functionNameToAddr = new HashMap<>();
+    private HashMap<String, ArrayList<String>> functionNameToAddr = new HashMap<>();
 
     private String highlightedAddress = "";
     private String selectedStrAddress = "";
     private int selectedColumnIndex = -1;
+
+    private int currentSortMethod = 0; // 0 = Имя, 1 = Размер, 2 = Дата, 3 = Тип
+    private boolean isReverseSort = false;
+    private File currentDir = android.os.Environment.getExternalStorageDirectory();
 
     private String lastSearchQuery = "";
     private ArrayList<String> selectedExportFunctions = new ArrayList<>();
@@ -330,6 +342,7 @@ public class MainActivity extends Activity {
         if (currentTab == 0) {
             popup.getMenu().add(0, 8, 0, isShowHexEnabled ? "Visual: Hide HEX" : "Visual: Show HEX");
             popup.getMenu().add(0, 7, 0, "Export functions list");
+            popup.getMenu().add(0, 10, 0, "Export: functions tree");
             popup.getMenu().add(0, 1, 0, "Jump: to address");
             popup.getMenu().add(0, 2, 0, "Search: text");
             popup.getMenu().add(0, 3, 0, "Search: next next");
@@ -340,13 +353,17 @@ public class MainActivity extends Activity {
             popup.getMenu().add(0, 2, 0, "Search: text");
             popup.getMenu().add(0, 3, 0, "Search: next next");
         }
+        
+        popup.getMenu().add(0, 9, 0, "Settings");
 
         popup.setOnMenuItemClickListener(item -> {
             switch(item.getItemId()) {
+                case 9: showSettingsDialog(); break;
                 case 8: 
                     toggleShowHex();
                     break;
                 case 7: showExportFunctionsDialog(); break;
+                case 10: showExportFunctionsTreeDialog(); break;
                 case 1: showJumpDialog(); break;
                 case 2:
                     if (currentTab == 0) showIdaSearchDialog(false);
@@ -368,6 +385,27 @@ public class MainActivity extends Activity {
         private void toggleShowHex() {
         isShowHexEnabled = !isShowHexEnabled;
         listAdapter.notifyDataSetChanged();
+    }
+
+    private void showSettingsDialog() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Settings");
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(40, 20, 40, 20);
+
+        SharedPreferences prefs = getSharedPreferences("ida_prefs", Context.MODE_PRIVATE);
+        CheckBox cbCustomProvider = new CheckBox(this);
+        cbCustomProvider.setText("Use system file provider");
+        cbCustomProvider.setChecked(prefs.getBoolean("use_system_provider", false));
+        cbCustomProvider.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            prefs.edit().putBoolean("use_system_provider", isChecked).apply();
+        });
+
+        layout.addView(cbCustomProvider);
+        builder.setView(layout);
+        builder.setPositiveButton("Close", null);
+        builder.show();
     }
 
     private void goBackHistory() {
@@ -506,9 +544,9 @@ public class MainActivity extends Activity {
                     }
                 }
                 
-                // Если это имя функции, заменяем строку поиска на её Hex-адрес
+                // Если это имя функции, заменяем строку поиска на её Hex-адрес (прыгаем на первый/основной чанк)
                 if (functionNameToAddr.containsKey(originalName)) {
-                    rawUpper = functionNameToAddr.get(originalName).toUpperCase();
+                    rawUpper = functionNameToAddr.get(originalName).get(0).toUpperCase();
                 }
                 
                 try {
@@ -676,6 +714,68 @@ public class MainActivity extends Activity {
             }
         });
 
+        btnAdd.setOnLongClickListener(v -> {
+            Dialog bulkDialog = new Dialog(MainActivity.this, android.R.style.Theme_DeviceDefault_Light_NoActionBar_Fullscreen);
+            
+            LinearLayout bulkRoot = new LinearLayout(MainActivity.this);
+            bulkRoot.setOrientation(LinearLayout.VERTICAL);
+            bulkRoot.setPadding(40, 40, 40, 40);
+
+            EditText bulkInput = new EditText(MainActivity.this);
+            bulkInput.setHint("Paste functions list here...\nsub_27457E4\nsub_27D67BC // Profile secondary function");
+            bulkInput.setSingleLine(false);
+            bulkInput.setGravity(Gravity.TOP | Gravity.START);
+            bulkInput.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+            LinearLayout btnRow = new LinearLayout(MainActivity.this);
+            btnRow.setOrientation(LinearLayout.HORIZONTAL);
+            btnRow.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            
+            Button btnCancel = new Button(MainActivity.this);
+            btnCancel.setText("Cancel");
+            btnCancel.setBackgroundColor(Color.TRANSPARENT);
+            btnCancel.setTextColor(Color.RED);
+            
+            View spacer = new View(MainActivity.this);
+            spacer.setLayoutParams(new LinearLayout.LayoutParams(0, 0, 1));
+            
+            Button btnAddBulk = new Button(MainActivity.this);
+            btnAddBulk.setText("Add");
+            btnAddBulk.setTextColor(Color.parseColor("#00A2E8"));
+            btnAddBulk.setBackgroundColor(Color.TRANSPARENT);
+
+            btnRow.addView(btnCancel);
+            btnRow.addView(spacer);
+            btnRow.addView(btnAddBulk);
+
+            bulkRoot.addView(bulkInput);
+            bulkRoot.addView(btnRow);
+            bulkDialog.setContentView(bulkRoot);
+
+            btnCancel.setOnClickListener(bv -> bulkDialog.dismiss());
+            
+            btnAddBulk.setOnClickListener(bv -> {
+                String[] lines = bulkInput.getText().toString().split("\n");
+                for (String line : lines) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+                    // Разбиваем строку по пробелам/табам и берем только первое слово
+                    String[] parts = line.split("\\s+");
+                    if (parts.length > 0) {
+                        String funcName = parts[0];
+                        if (!funcName.isEmpty() && !selectedExportFunctions.contains(funcName)) {
+                            selectedExportFunctions.add(funcName);
+                        }
+                    }
+                }
+                updateListUI.run();
+                bulkDialog.dismiss();
+            });
+
+            bulkDialog.show();
+            return true;
+        });
+
         updateListUI.run();
         builder.setView(root);
         
@@ -694,60 +794,116 @@ public class MainActivity extends Activity {
         builder.show();
     }
 
-    private String extractFunctionContentSync(String targetAddr) {
+        static class ExtractResult {
+        String content;
+        String stopReason;
+        boolean reachedEndMarker;
+        ExtractResult(String c, String sr, boolean rem) { 
+            content = c; stopReason = sr; reachedEndMarker = rem; 
+        }
+    }
+
+    private ExtractResult extractFunctionContentSync(String targetAddr) {
         try {
             BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(cacheIdaFile)));
             String line;
             StringBuilder sb = new StringBuilder();
             boolean capturing = false;
-            boolean passedEndMarker = false;
-            int consecutiveEmptyLines = 0;
+            int linesCaptured = 0;
             String upperTarget = targetAddr.toUpperCase();
+            
+            long targetVal = -1;
+            String hex8 = upperTarget;
+            String hex16 = upperTarget;
+            try {
+                targetVal = Long.parseLong(targetAddr, 16);
+                hex8 = String.format("%08X", targetVal);
+                hex16 = String.format("%016X", targetVal);
+            } catch (Exception ignored) {}
+
+            boolean isFunc = functionStarts.contains(hex8) || functionStarts.contains(hex16);
+            String stopReason = "End of file reached (no explicit end marker)";
+            boolean reachedEnd = false;
 
             while ((line = br.readLine()) != null) {
                 if (!capturing) {
-                    // Быстрый фильтр (String.contains в сотни раз быстрее Regex)
-                    if (line.contains(upperTarget)) {
+                    if (line.contains(upperTarget) || line.contains(hex8) || line.contains(hex16)) {
                         Matcher mAddr = patAddr.matcher(line);
-                        if (mAddr.find() && mAddr.group(1).equalsIgnoreCase(targetAddr)) {
-                            // Быстрый срез вместо тяжелого replaceFirst
-                            String cleanContent = line.substring(mAddr.end()).trim();
-                            if (cleanContent.isEmpty() || cleanContent.equals(";") || cleanContent.contains("S U B R O U T I N E")) continue; 
-                            capturing = true;
-                            sb.append(line).append("\n");
+                        if (mAddr.find()) {
+                            boolean match = false;
+                            if (targetVal != -1) {
+                                try { if (Long.parseLong(mAddr.group(1), 16) == targetVal) match = true; } catch (Exception ignored) {}
+                            } else {
+                                match = mAddr.group(1).equalsIgnoreCase(targetAddr);
+                            }
+                            
+                            if (match) {
+                                String cleanContent = line.substring(mAddr.end()).trim();
+                                if (cleanContent.isEmpty() || cleanContent.equals(";") || cleanContent.contains("S U B R O U T I N E")) continue; 
+                                capturing = true;
+                                sb.append(line).append("\n");
+                            }
                         }
                     }
                 } else {
-                    if (line.contains("; =============== S U B R O U T I N E") || line.contains("proc near")) {
-                        if (passedEndMarker) break; 
-                    }
+                    linesCaptured++;
                     
-                    String lineContent = line;
-                    Matcher mAddr = patAddr.matcher(line);
-                    if (mAddr.find()) {
-                        lineContent = line.substring(mAddr.end()).trim();
-                    } else {
-                        lineContent = lineContent.trim();
+                    // Жесткий лимит: если мы прочитали больше 15000 строк (около 1.5 МБ), принудительно прерываем,
+                    // чтобы не получить OutOfMemoryError.
+                    if (linesCaptured > 15000) {
+                        stopReason = "Failsafe: Reached 15000 lines limit to prevent OOM.";
+                        reachedEnd = false;
+                        break;
                     }
 
-                    if (lineContent.isEmpty() || lineContent.equals(";")) consecutiveEmptyLines++;
-                    else consecutiveEmptyLines = 0;
-
-                    if (passedEndMarker && consecutiveEmptyLines >= 2) break;
-
+                    if (isFunc) {
+                        if (line.contains("; =============== S U B R O U T I N E") && linesCaptured > 1) {
+                            stopReason = "Cut off: Hit next SUBROUTINE block.";
+                            break; 
+                        }
+                        if (line.contains("proc near") && linesCaptured > 3) {
+                            stopReason = "Cut off: Hit 'proc near'.";
+                            break; 
+                        }
+                        if (line.contains("; End of function") || line.contains("; END OF FUNCTION CHUNK") || line.contains("COLLAPSED CHUNK") || line.matches("^\\s*[a-zA-Z0-9_]+\\s+endp\\b.*") || line.contains(" endp")) {
+                            sb.append(line).append("\n");
+                            stopReason = "Successfully reached end marker.";
+                            reachedEnd = true;
+                            break;
+                        }
+                    } else {
+                        if (linesCaptured > 1) {
+                            if (line.contains("; =============== S U B R O U T I N E") || line.contains("; ---------------------------------------------------------------------------")) {
+                                stopReason = "Reached separator block, stopping vtable.";
+                                reachedEnd = true;
+                                break;
+                            }
+                            Matcher mStopAddr = patAddr.matcher(line);
+                            if (mStopAddr.find()) {
+                                String clean = line.substring(mStopAddr.end()).trim();
+                                boolean isLabelWithColon = clean.matches("^([a-zA-Z_][a-zA-Z0-9_]*:).*") && !clean.startsWith("loc_");
+                                
+                                // Надежная проверка: если строка после адреса начинается с имени лейбла (off_, unk_ и т.д.),
+                                // это значит начался новый блок данных, и мы можем смело останавливать захват vtable.
+                                boolean isDataLabel = clean.matches("^(off_|unk_|dword_|qword_|byte_|word_|stru_|asc_)[0-9A-Fa-f]+.*");
+                                
+                                if (isLabelWithColon || isDataLabel) {
+                                    stopReason = "Reached next data definition, stopping vtable.";
+                                    reachedEnd = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     sb.append(line).append("\n");
-
-                    if (line.contains("; End of function") || line.contains("endp")) passedEndMarker = true;
-                    if (passedEndMarker && line.contains("; } // starts at")) break; 
-                    if (passedEndMarker && (line.contains("Segment type:") || line.contains("Section "))) break;
                 }
             }
             br.close();
             String res = sb.toString().trim();
             res = res.replaceAll("(\\n\\s*[a-zA-Z0-9_\\.\\-]+:[0-9A-Fa-f]+\\s*)+$", "");
-            return res;
+            return new ExtractResult(res, stopReason, reachedEnd);
         } catch (Exception e) {
-            return "";
+            return new ExtractResult("", "Error: " + e.getMessage(), false);
         }
     }
 
@@ -784,13 +940,20 @@ public class MainActivity extends Activity {
                 File dir = new File(android.os.Environment.getExternalStorageDirectory(), "IDAViewMobile");
                 if (!dir.exists()) dir.mkdirs();
                 File outFile = new File(dir, baseName + "_selected_functions_list.txt");
+                File logFile = new File(getExternalFilesDir(null), "export_functions_log.txt");
                 
                 FileOutputStream fos = new FileOutputStream(outFile);
+                FileOutputStream logFos = new FileOutputStream(logFile);
+                StringBuilder logBuilder = new StringBuilder();
+                logBuilder.append("--- Export Log Started ---\n");
                 
                 boolean isFirst = true;
+                int exportedCount = 0;
+                
                 for (int i = 0; i < functions.size(); i++) {
                     String funcInput = functions.get(i);
                     String targetAddr = "";
+                    logBuilder.append("\n[INFO] Processing: ").append(funcInput).append("\n");
                     
                     // Учет возможных ренеймов из текущей сессии
                     String originalName = funcInput;
@@ -801,38 +964,88 @@ public class MainActivity extends Activity {
                         }
                     }
                     
+                    java.util.LinkedHashSet<String> uniqueAddrs = new java.util.LinkedHashSet<>();
                     if (functionNameToAddr.containsKey(originalName)) {
-                        targetAddr = functionNameToAddr.get(originalName);
+                        uniqueAddrs.addAll(functionNameToAddr.get(originalName));
+                        logBuilder.append("  [OK] Found ").append(uniqueAddrs.size()).append(" unique chunk(s) via name.\n");
                     } else {
-                        // Фолбэк на случай если ввели напрямую hex адрес
                         try {
                             long val = Long.parseLong(funcInput, 16);
                             targetAddr = String.format("%08X", val);
                             if (!functionStarts.contains(targetAddr)) {
                                 targetAddr = String.format("%016X", val);
                             }
-                        } catch (Exception ignored) {}
+                            uniqueAddrs.add(targetAddr);
+                            logBuilder.append("  [OK] Parsed as hex address: ").append(targetAddr).append("\n");
+                        } catch (Exception e) {
+                            logBuilder.append("  [ERROR] Could not resolve address or parse hex for: ").append(funcInput).append("\n");
+                        }
                     }
                     
-                    if (!targetAddr.isEmpty()) {
-                        String content = extractFunctionContentSync(targetAddr);
-                        if (!content.isEmpty()) {
-                            // Применяем актуальные комментарии и ренеймы к блоку кода перед сохранением
-                            content = applyPendingChanges(content);
-                            if (!isFirst) {
-                                fos.write("\n\n=======================\n\n".getBytes("UTF-8"));
+                    // Собираем только валидные чанки, игнорируя "чужие" схлопнутые
+                    ArrayList<String> validAddrs = new ArrayList<>();
+                    ArrayList<String> validContents = new ArrayList<>();
+                    
+                    for (String tAddr : uniqueAddrs) {
+                        if (tAddr != null && !tAddr.isEmpty()) {
+                            ExtractResult extRes = extractFunctionContentSync(tAddr);
+                            String content = extRes.content;
+                            // Если чанк ссылается на чужой код (Collapsed) - выкидываем его
+                            if (!content.isEmpty() && !content.contains("COLLAPSED CHUNK")) {
+                                validAddrs.add(tAddr);
+                                validContents.add(content);
+                                logBuilder.append("  [INFO] Stop reason at ").append(tAddr).append(": ").append(extRes.stopReason).append("\n");
+                                if (!extRes.reachedEndMarker) {
+                                    logBuilder.append("  [WARNING] Chunk may have been cut off or lacks valid end marker!\n");
+                                }
+                            } else if (content.contains("COLLAPSED CHUNK")) {
+                                logBuilder.append("  [INFO] Skipped collapsed chunk at ").append(tAddr).append("\n");
+                            } else {
+                                logBuilder.append("  [ERROR] Function content is empty at ").append(tAddr).append(".\n");
+                            }
+                        }
+                    }
+
+                    // Экспортируем только отфильтрованные чанки с правильной нумерацией
+                    for (int chunkIdx = 0; chunkIdx < validAddrs.size(); chunkIdx++) {
+                        String tAddr = validAddrs.get(chunkIdx);
+                        String content = validContents.get(chunkIdx);
+                        
+                        content = applyPendingChanges(content);
+                        if (!isFirst) {
+                            try { fos.write("\n\n=======================\n\n".getBytes("UTF-8")); } catch(Exception e){}
+                        }
+                        try {
+                            if (validAddrs.size() > 1) {
+                                String chunkHeader = "; --- Chunk " + (chunkIdx + 1) + " of " + validAddrs.size() + " ---\n";
+                                fos.write(chunkHeader.getBytes("UTF-8"));
                             }
                             fos.write(content.getBytes("UTF-8"));
                             isFirst = false;
+                            // Если успешно записали последний валидный чанк - плюсуем к счетчику
+                            if (chunkIdx == validAddrs.size() - 1) exportedCount++;
+                            logBuilder.append("  [SUCCESS] Successfully exported chunk at ").append(tAddr).append(".\n");
+                        } catch (Exception e) {
+                            logBuilder.append("  [ERROR] Failed writing to file: ").append(e.getMessage()).append("\n");
                         }
                     }
                 }
                 fos.close();
                 
+                logBuilder.append("\n--- Export Completed. Total exported: ").append(exportedCount).append(" ---\n");
+                logFos.write(logBuilder.toString().getBytes("UTF-8"));
+                logFos.close();
+                
+                final int finalExportedCount = exportedCount;
                 new Handler(Looper.getMainLooper()).post(() -> {
                     pd.dismiss();
-                    Toast.makeText(MainActivity.this, "Exported to: " + outFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
-                    selectedExportFunctions.clear();
+                    if (finalExportedCount > 0) {
+                        Toast.makeText(MainActivity.this, "Exported " + finalExportedCount + " functions to: " + outFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
+                        selectedExportFunctions.clear();
+                    } else {
+                        if (outFile.exists()) outFile.delete(); // Удаляем пустой файл на 0 байт
+                        Toast.makeText(MainActivity.this, "Error: Export failed (0 functions). Check log in Android/data/.../files/export_functions_log.txt", Toast.LENGTH_LONG).show();
+                    }
                 });
             } catch (Exception e) {
                 new Handler(Looper.getMainLooper()).post(() -> {
@@ -841,6 +1054,192 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    private void showExportFunctionsTreeDialog() {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Export Functions Tree");
+        final EditText input = new EditText(this);
+        input.setHint("Target function/vtable (e.g. sub_401000)");
+        input.setSingleLine(true);
+        LinearLayout layout = new LinearLayout(this);
+        layout.setPadding(40, 20, 40, 20);
+        layout.addView(input, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        builder.setView(layout);
+        builder.setPositiveButton("Export", (dialog, which) -> {
+            String target = input.getText().toString().trim();
+            if (!target.isEmpty()) exportFunctionsTree(target);
+        });
+        builder.setNegativeButton("Cancel", null);
+        builder.show();
+    }
+
+    private String getBaseAddress(String fromAddr, String fromName) {
+        String origName = fromName;
+        
+        // 1. Убираем смещение (например, +3C или -14) в конце имени, которое IDA добавляет для инструкций
+        Matcher offsetMatcher = Pattern.compile("([+-][0-9A-Fa-f]+)$").matcher(origName);
+        if (offsetMatcher.find()) {
+            origName = origName.substring(0, offsetMatcher.start());
+        }
+
+        // 2. Проверяем, не переименовывал ли пользователь это имя
+        for (Map.Entry<String, String> entry : pendingRenames.entrySet()) {
+            if (entry.getValue().equals(origName)) { origName = entry.getKey(); break; }
+        }
+        
+        // 3. Проверяем точное совпадение по имени функции (если это известная функция)
+        if (functionNameToAddr.containsKey(origName)) {
+            return functionNameToAddr.get(origName).get(0);
+        }
+        
+        // 4. Достаем базовый адрес из суффикса IDA (например, из _sub_2685FDC вытащит 2685FDC)
+        Matcher m = Pattern.compile("_([0-9A-Fa-f]+)$").matcher(origName);
+        if (m.find()) {
+            return m.group(1);
+        }
+        
+        // 5. Fallback: возвращаем исходный адрес, если это таблица или кастомное имя без суффиксов
+        return fromAddr; 
+    }
+
+    private void exportFunctionsTree(String startQuery) {
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, 2);
+                Toast.makeText(this, "Permission required. Please grant and try again.", Toast.LENGTH_LONG).show();
+                return;
+            }
+        }
+
+        ProgressDialog pd = ProgressDialog.show(this, "Exporting Tree", "Tracing xrefs... This may take a while.", true, false);
+        new Thread(() -> {
+            try {
+                String originalName = startQuery;
+                for (Map.Entry<String, String> entry : pendingRenames.entrySet()) {
+                    if (entry.getValue().equals(startQuery)) { originalName = entry.getKey(); break; }
+                }
+                
+                String targetAddr = "";
+                if (functionNameToAddr.containsKey(originalName)) {
+                    targetAddr = functionNameToAddr.get(originalName).get(0);
+                } else {
+                    try {
+                        long val = Long.parseLong(startQuery, 16);
+                        targetAddr = String.format("%08X", val);
+                        if (!functionStarts.contains(targetAddr)) {
+                            targetAddr = String.format("%016X", val);
+                        }
+                    } catch (Exception e) {}
+                }
+                
+                if (targetAddr.isEmpty()) {
+                    new Handler(Looper.getMainLooper()).post(() -> {
+                        pd.dismiss();
+                        Toast.makeText(MainActivity.this, "Could not resolve address for: " + startQuery, Toast.LENGTH_LONG).show();
+                    });
+                    return;
+                }
+
+                File logFile = new File(getExternalFilesDir(null), "export_functions_tree_log.txt");
+                FileOutputStream logFos = new FileOutputStream(logFile);
+                StringBuilder logBuilder = new StringBuilder();
+                logBuilder.append("--- Export Tree Log Started ---\n");
+                logBuilder.append("Target resolved to hex: ").append(targetAddr).append("\n\n");
+
+                List<String> exportOrder = new ArrayList<>();
+                Set<String> visited = new HashSet<>();
+                
+                dfsTree(targetAddr, visited, exportOrder, 0, 100, logBuilder); 
+
+                String baseName = "IDA_Tree_Export";
+                if (currentFileUri != null) {
+                    try {
+                        android.database.Cursor cursor = getContentResolver().query(currentFileUri, null, null, null, null);
+                        if (cursor != null && cursor.moveToFirst()) {
+                            int nameIndex = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                            if (nameIndex != -1) {
+                                baseName = cursor.getString(nameIndex);
+                                int dotIndex = baseName.lastIndexOf('.');
+                                if (dotIndex > 0) baseName = baseName.substring(0, dotIndex);
+                            }
+                            cursor.close();
+                        }
+                    } catch (Exception ignore) {}
+                    baseName = baseName.replaceAll("[^a-zA-Z0-9_\\-]", "_");
+                }
+
+                File dir = new File(android.os.Environment.getExternalStorageDirectory(), "IDAViewMobile");
+                if (!dir.exists()) dir.mkdirs();
+                File outFile = new File(dir, baseName + "_tree_" + originalName + ".txt");
+                FileOutputStream fos = new FileOutputStream(outFile);
+                
+                int exportedCount = 0;
+                boolean isFirst = true;
+                
+                logBuilder.append("\n--- Starting extraction ---\n");
+                
+                for (String addr : exportOrder) {
+                    ExtractResult extRes = extractFunctionContentSync(addr);
+                    String content = extRes.content;
+                    if (!content.isEmpty() && !content.contains("COLLAPSED CHUNK")) {
+                        content = applyPendingChanges(content);
+                        if (!isFirst) {
+                            fos.write("\n\n; ==========================================================\n\n".getBytes("UTF-8"));
+                        }
+                        fos.write(content.getBytes("UTF-8"));
+                        isFirst = false;
+                        exportedCount++;
+                        logBuilder.append("[OK] Extracted block at: ").append(addr).append(" (Stop reason: ").append(extRes.stopReason).append(")\n");
+                    } else {
+                        logBuilder.append("[SKIP] Block at ").append(addr).append(" was empty or collapsed.\n");
+                    }
+                }
+                fos.close();
+                
+                logBuilder.append("\n--- Export Completed. Total exported nodes: ").append(exportedCount).append(" ---\n");
+                logFos.write(logBuilder.toString().getBytes("UTF-8"));
+                logFos.close();
+                
+                final int finalCount = exportedCount;
+                final String outPath = outFile.getAbsolutePath();
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    pd.dismiss();
+                    if (finalCount > 0) {
+                        Toast.makeText(MainActivity.this, "Exported " + finalCount + " nodes to: " + outPath, Toast.LENGTH_LONG).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Export failed (0 nodes). Check log in Android/data/.../files/export_functions_tree_log.txt", Toast.LENGTH_LONG).show();
+                    }
+                });
+            } catch (Exception e) {
+                new Handler(Looper.getMainLooper()).post(() -> {
+                    pd.dismiss();
+                    Toast.makeText(MainActivity.this, "Error exporting tree: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                });
+            }
+        }).start();
+    }
+    
+    private void dfsTree(String addr, Set<String> visited, List<String> order, int depth, int maxDepth, StringBuilder log) {
+        if (depth > maxDepth) {
+            log.append(String.format("%" + (depth*2+2) + "s", "")).append("Max depth reached at ").append(addr).append("\n");
+            return;
+        }
+        if (visited.contains(addr)) {
+            log.append(String.format("%" + (depth*2+2) + "s", "")).append("Already visited: ").append(addr).append("\n");
+            return;
+        }
+        visited.add(addr);
+        
+        log.append(String.format("%" + (depth*2+2) + "s", "")).append("Exploring: ").append(addr).append("\n");
+        
+        List<Xref> xrefsTo = getXrefs(addr, true);
+        for (Xref x : xrefsTo) {
+            String baseAddr = getBaseAddress(x.fromAddr, x.fromName);
+            log.append(String.format("%" + (depth*2+4) + "s", "")).append("<- Xref from: ").append(x.fromName).append(" (resolved to ").append(baseAddr).append(")\n");
+            dfsTree(baseAddr, visited, order, depth + 1, maxDepth, log);
+        }
+        order.add(addr);
     }
 
     // --- IDA / Strings Search ---
@@ -924,8 +1323,11 @@ public class MainActivity extends Activity {
 
     private void activateStringsSearch() { stringsSearchBar.setVisibility(View.VISIBLE); editStrSearch.requestFocus(); }
     private void resetStringsSearch() {
-        editStrSearch.setText(""); stringsSearchBar.setVisibility(View.GONE);
-        isSearchingStrings = false; listAdapter.notifyDataSetChanged();
+        if (searchRunnable != null) searchHandler.removeCallbacks(searchRunnable);
+        editStrSearch.setText(""); 
+        stringsSearchBar.setVisibility(View.GONE);
+        isSearchingStrings = false; 
+        listAdapter.notifyDataSetChanged();
     }
 
     private void filterStringsAsync(String query) {
@@ -936,9 +1338,9 @@ public class MainActivity extends Activity {
         }
         new Thread(() -> {
             try {
-                File sourceFile = (currentTab == 2) ? cacheFuncFile : cacheStrFile;
-                File targetFile = (currentTab == 2) ? cacheFilteredFuncFile : cacheFilteredStrFile;
-                LongArray targetOffsets = (currentTab == 2) ? filteredFuncOffsets : filteredStrOffsets;
+                File sourceFile = (currentTab == 2) ? cacheStrFile : cacheFuncFile;
+                File targetFile = (currentTab == 2) ? cacheFilteredStrFile : cacheFilteredFuncFile;
+                LongArray targetOffsets = (currentTab == 2) ? filteredStrOffsets : filteredFuncOffsets;
                 
                 BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(sourceFile)));
                 FileOutputStream fos = new FileOutputStream(targetFile);
@@ -965,10 +1367,183 @@ public class MainActivity extends Activity {
     }
 
     private void openFilePicker() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
-        startActivityForResult(intent, PICK_FILE_REQUEST);
+        SharedPreferences prefs = getSharedPreferences("ida_prefs", Context.MODE_PRIVATE);
+        if (!prefs.getBoolean("use_system_provider", false)) {
+            showCustomFileManager();
+        } else {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            startActivityForResult(intent, PICK_FILE_REQUEST);
+        }
+    }
+
+    private void showCustomFileManager() {
+        SharedPreferences prefs = getSharedPreferences("ida_prefs", Context.MODE_PRIVATE);
+        currentSortMethod = prefs.getInt("sort_method", 0);
+        isReverseSort = prefs.getBoolean("reverse_sort", false);
+        String savedDirPath = prefs.getString("last_dir", null);
+        if (savedDirPath != null) {
+            currentDir = new File(savedDirPath);
+        }
+
+        Dialog dialog = new Dialog(this, android.R.style.Theme_DeviceDefault_Light_NoActionBar_Fullscreen);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Color.WHITE);
+
+        // Верхняя панель управления
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setPadding(16, 16, 16, 16);
+        header.setBackgroundColor(Color.parseColor("#EEEEEE"));
+        
+        Button btnSortMethod = new Button(this);
+        String[] sortNames = {"Имя", "Размер", "Дата", "Тип"};
+        btnSortMethod.setText("ПО: " + sortNames[currentSortMethod]);
+        btnSortMethod.setBackgroundColor(Color.TRANSPARENT);
+        btnSortMethod.setTextColor(Color.BLACK);
+        
+        Button btnSortDir = new Button(this);
+        btnSortDir.setText(isReverseSort ? "↑" : "↓");
+        btnSortDir.setBackgroundColor(Color.TRANSPARENT);
+        btnSortDir.setTextColor(Color.BLACK);
+        
+        LinearLayout.LayoutParams pSortMethod = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        btnSortMethod.setLayoutParams(pSortMethod);
+        btnSortMethod.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        
+        header.addView(btnSortMethod);
+        header.addView(btnSortDir);
+        
+        // Текущий путь
+        TextView tvPath = new TextView(this);
+        tvPath.setPadding(16, 8, 16, 8);
+        tvPath.setTextColor(Color.DKGRAY);
+        tvPath.setTextSize(12);
+        
+        // Список файлов
+        ListView lvFiles = new ListView(this);
+        lvFiles.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        
+        root.addView(header);
+        root.addView(tvPath);
+        root.addView(lvFiles);
+        
+        dialog.setContentView(root);
+        
+        Runnable updateList = new Runnable() {
+            @Override
+            public void run() {
+                tvPath.setText(currentDir.getAbsolutePath());
+                File[] files = currentDir.listFiles();
+                if (files == null) files = new File[0];
+                
+                List<File> fileList = new ArrayList<>(java.util.Arrays.asList(files));
+                
+                java.util.Collections.sort(fileList, (f1, f2) -> {
+                    // Папки всегда остаются наверху, независимо от реверса сортировки
+                    if (f1.isDirectory() && !f2.isDirectory()) return -1;
+                    if (!f1.isDirectory() && f2.isDirectory()) return 1;
+                    
+                    int res = 0;
+                    switch(currentSortMethod) {
+                        case 0: res = f1.getName().compareToIgnoreCase(f2.getName()); break;
+                        case 1: res = Long.compare(f1.length(), f2.length()); break;
+                        case 2: res = Long.compare(f1.lastModified(), f2.lastModified()); break;
+                        case 3: 
+                            String ext1 = getExt(f1); String ext2 = getExt(f2);
+                            res = ext1.compareToIgnoreCase(ext2); 
+                            if (res == 0) res = f1.getName().compareToIgnoreCase(f2.getName());
+                            break;
+                    }
+                    return isReverseSort ? -res : res;
+                });
+                
+                if (currentDir.getParentFile() != null) {
+                    fileList.add(0, new File(currentDir, "..")); // Навигация вверх
+                }
+                
+                BaseAdapter adapter = new BaseAdapter() {
+                    @Override public int getCount() { return fileList.size(); }
+                    @Override public Object getItem(int pos) { return fileList.get(pos); }
+                    @Override public long getItemId(int pos) { return pos; }
+                    @Override public View getView(int pos, View cv, ViewGroup parent) {
+                        TextView tv = new TextView(MainActivity.this);
+                        tv.setPadding(32, 32, 32, 32);
+                        tv.setTextSize(16);
+                        tv.setTextColor(Color.BLACK);
+                        tv.setSingleLine(true);
+                        
+                        File f = fileList.get(pos);
+                        if (f.getName().equals("..")) {
+                            tv.setText("📁 .. (Вверх)");
+                        } else {
+                            String icon = f.isDirectory() ? "📁 " : "📄 ";
+                            String info = "";
+                            if (!f.isDirectory()) {
+                                info = "  (" + (f.length() / 1024) + " KB)";
+                            }
+                            tv.setText(icon + f.getName() + info);
+                        }
+                        return tv;
+                    }
+                };
+                lvFiles.setAdapter(adapter);
+            }
+        };
+        
+        lvFiles.setOnItemClickListener((parent, view, pos, id) -> {
+            File f = (File) lvFiles.getItemAtPosition(pos);
+            if (f.getName().equals("..")) {
+                currentDir = currentDir.getParentFile();
+                updateList.run();
+            } else if (f.isDirectory()) {
+                if (f.canRead()) {
+                    currentDir = f;
+                    updateList.run();
+                } else {
+                    Toast.makeText(MainActivity.this, "Access denied", Toast.LENGTH_SHORT).show();
+                }
+            } else {
+                getSharedPreferences("ida_prefs", Context.MODE_PRIVATE).edit()
+                        .putString("last_dir", currentDir.getAbsolutePath()).apply();
+                dialog.dismiss();
+                currentFileUri = Uri.fromFile(f);
+                processIdaViewFile(currentFileUri);
+            }
+        });
+        
+        btnSortMethod.setOnClickListener(v -> {
+            PopupMenu p = new PopupMenu(MainActivity.this, btnSortMethod);
+            for (int i=0; i<sortNames.length; i++) p.getMenu().add(0, i, 0, sortNames[i]);
+            p.setOnMenuItemClickListener(item -> {
+                currentSortMethod = item.getItemId();
+                getSharedPreferences("ida_prefs", Context.MODE_PRIVATE).edit()
+                        .putInt("sort_method", currentSortMethod).apply();
+                btnSortMethod.setText("ПО: " + sortNames[currentSortMethod]);
+                updateList.run();
+                return true;
+            });
+            p.show();
+        });
+        
+        btnSortDir.setOnClickListener(v -> {
+            isReverseSort = !isReverseSort;
+            getSharedPreferences("ida_prefs", Context.MODE_PRIVATE).edit()
+                    .putBoolean("reverse_sort", isReverseSort).apply();
+            btnSortDir.setText(isReverseSort ? "↑" : "↓");
+            updateList.run();
+        });
+        
+        updateList.run();
+        dialog.show();
+    }
+
+    private String getExt(File f) {
+        String n = f.getName();
+        int i = n.lastIndexOf('.');
+        return (i > 0) ? n.substring(i+1) : "";
     }
 
     @Override
@@ -1102,7 +1677,10 @@ public class MainActivity extends Activity {
                                         String hexAddr = addrPart.substring(colon + 1);
                                         String funcName = fLine.substring(t2 + 1);
                                         functionStarts.add(hexAddr);
-                                        functionNameToAddr.put(funcName, hexAddr);
+                                        if (!functionNameToAddr.containsKey(funcName)) {
+                                            functionNameToAddr.put(funcName, new ArrayList<>());
+                                        }
+                                        functionNameToAddr.get(funcName).add(hexAddr);
                                     }
                                 }
                             }
@@ -1179,52 +1757,8 @@ public class MainActivity extends Activity {
         ProgressDialog pd = ProgressDialog.show(this, "Copying", "Capturing function...", true, false);
         new Thread(() -> {
             try {
-                BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(cacheIdaFile)));
-                String line;
-                StringBuilder sb = new StringBuilder();
-                boolean capturing = false;
-                boolean passedEndMarker = false;
-                int consecutiveEmptyLines = 0;
-                String upperTarget = targetAddr.toUpperCase();
-
-                while ((line = br.readLine()) != null) {
-                    if (!capturing) {
-                        if (line.contains(upperTarget)) {
-                            Matcher mAddr = patAddr.matcher(line);
-                            if (mAddr.find() && mAddr.group(1).equalsIgnoreCase(targetAddr)) {
-                                String cleanContent = line.substring(mAddr.end()).trim();
-                                if (cleanContent.isEmpty() || cleanContent.equals(";") || cleanContent.contains("S U B R O U T I N E")) continue; 
-                                capturing = true;
-                                sb.append(line).append("\n");
-                            }
-                        }
-                    } else {
-                        if (line.contains("; =============== S U B R O U T I N E") || line.contains("proc near")) {
-                            if (passedEndMarker) break; 
-                        }
-
-                        String lineContent = line;
-                        Matcher mAddr = patAddr.matcher(line);
-                        if (mAddr.find()) lineContent = line.substring(mAddr.end()).trim();
-                        else lineContent = lineContent.trim();
-
-                        if (lineContent.isEmpty() || lineContent.equals(";")) consecutiveEmptyLines++;
-                        else consecutiveEmptyLines = 0;
-
-                        if (passedEndMarker && consecutiveEmptyLines >= 2) break;
-
-                        sb.append(line).append("\n");
-
-                        if (line.contains("; End of function") || line.contains("endp")) passedEndMarker = true;
-                        if (passedEndMarker && line.contains("; } // starts at")) break; 
-                        if (passedEndMarker && (line.contains("Segment type:") || line.contains("Section "))) break;
-                    }
-                }
-                br.close();
-
-                String tempRes = sb.toString().trim();
-                tempRes = tempRes.replaceAll("(\\n\\s*[a-zA-Z0-9_\\.\\-]+:[0-9A-Fa-f]+\\s*)+$", "");
-                final String res = tempRes;
+                ExtractResult extRes = extractFunctionContentSync(targetAddr);
+                final String res = extRes.content;
 
                 new Handler(Looper.getMainLooper()).post(() -> {
                     pd.dismiss();
@@ -1234,7 +1768,8 @@ public class MainActivity extends Activity {
                         android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
                         android.content.ClipData clip = android.content.ClipData.newPlainText("IDA Function", res);
                         clipboard.setPrimaryClip(clip);
-                        Toast.makeText(MainActivity.this, "Function copied to clipboard!", Toast.LENGTH_SHORT).show();
+                        String msg = extRes.reachedEndMarker ? "Function copied to clipboard!" : "Function copied (WARNING: cut off prematurely)";
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
                     }
                 });
             } catch (Exception e) {
